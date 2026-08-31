@@ -14,6 +14,12 @@ RUN git clone -b $TONGSUO_VERSION --depth=1 https://github.com/tongsuo-project/t
 
 WORKDIR /usr/local/src/tongsuo-$TONGSUO_VERSION
 
+# --prefix 指定铜锁安装目录
+# --openssldir 指定配置文件和证书文件的存放目录
+# enable-xx 启用
+# -no-shared 不生成.so文件 只生成.a文件
+# -fPIC 生成位置无关代码 通常是编译动态库的要求
+# -no-shared -fPIC 建议一起使用
 RUN ./config --prefix=/usr/local/tongsuo \
     --openssldir=/usr/local/tongsuo/ssl \
     -Wl,-rpath,/usr/local/tongsuo/lib \
