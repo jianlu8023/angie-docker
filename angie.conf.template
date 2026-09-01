@@ -45,7 +45,11 @@ user  angie;
 worker_processes {{.Env.ANGIE_WORKER_PROCESSES}};
 worker_rlimit_nofile {{.Env.ANGIE_WORKER_RLIMIT_NOFILE}};
 
+{{- if eq (getenv "ANGIE_ERROR_LOG_TO_FILE" "off") "on" }}
 error_log /var/log/angie/error.log {{.Env.ANGIE_ERROR_LOG_SEVERITY}};
+{{- else }}
+error_log /dev/stderr {{.Env.ANGIE_ERROR_LOG_SEVERITY}};
+{{- end }}
 pid {{.Env.ANGIE_PID_FILE}};
 
 events {
@@ -67,6 +71,7 @@ http {
                         'ucs="$upstream_cache_status" ua="$upstream_addr" us="$upstream_status" '
                         'uct="$upstream_connect_time" urt="$upstream_response_time"';
 
+    access_log /dev/stdout  main;
     access_log /var/log/angie/access.log  main;
 
     sendfile    on;
