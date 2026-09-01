@@ -1,10 +1,24 @@
+# ==============================================================================
+# Angie — HTTP/3 (QUIC) 变体
+#
+# 与默认 Dockerfile 的区别：
+#   * 使用 OpenSSL 3.5+ 构建（自 3.5.1 起内置原生 QUIC），支持完整 HTTP/3 与 0-RTT early data
+#   * 不含 NTLS / 国密 —— 铜锁(Tongsuo) 基于 OpenSSL 3.0.3，与 QUIC 不可兼得
+#   * 额外提供 angie-console-light 控制台、angie-debug / angie-nodebug 双二进制、logrotate
+#
+# 构建: docker buildx build -t angie:h3-alpine -f Dockerfile-h3 .
+# 运行: docker run --rm -p 80:80 -p 443:443 -p 443:443/udp angie:h3-alpine
+#       （HTTP/3 走 UDP，务必放通 443/udp）
+# 调试: docker run -e ANGIE_BINARY=angie-debug -e ANGIE_ERROR_LOG_SEVERITY=debug ...
+# ==============================================================================
+# 跨阶段共享的版本号必须用「全局 ARG」：ENV 不会跨 FROM 传递到下一个 stage
 ARG CONSOLE_LIGHT_VERSION=1.8.2
 
 FROM alpine:3.22 AS builder
 
 ARG CONSOLE_LIGHT_VERSION
 
-ENV TONGSUO_VERSION=8.4.0 \
+ENV OPENSSL_VERSION=3.5.7 \
     ANGIE_VERSION=1.12.1 \
     PCRE2_VERSION=10.45
 
@@ -24,22 +38,22 @@ RUN apk add --no-cache \
 
 WORKDIR /tmp
 
-# Clone Tongsuo
-RUN git clone -b $TONGSUO_VERSION --depth 1 \
-    https://github.com/tongsuo-project/tongsuo.git \
-    tongsuo-$TONGSUO_VERSION
+# OpenSSL 3.5+ : QUIC 已内置，无需外部 QUIC 库（BoringSSL / LibreSSL / QuicTLS）
+RUN curl -fL -o openssl-$OPENSSL_VERSION.tar.gz \
+    https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz \
+    && tar -xzf openssl-$OPENSSL_VERSION.tar.gz
 
 # Download and extract Angie source
-RUN curl -L -o angie-$ANGIE_VERSION.tar.gz \
+RUN curl -fL -o angie-$ANGIE_VERSION.tar.gz \
     https://download.angie.software/files/angie-$ANGIE_VERSION.tar.gz \
     && tar -xzf angie-$ANGIE_VERSION.tar.gz
 
-# Download and extract PCRE2 source (built statically with JIT for regex performance)
-RUN curl -L -o pcre2-$PCRE2_VERSION.tar.gz \
+# PCRE2 源码编译，以便开启 JIT（Alpine 官方 pcre2 包不保证带 JIT）
+RUN curl -fL -o pcre2-$PCRE2_VERSION.tar.gz \
     https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE2_VERSION/pcre2-$PCRE2_VERSION.tar.gz \
     && tar -xzf pcre2-$PCRE2_VERSION.tar.gz
 
-# angie-console-light 是纯前端产物（官方已提供预编译包）
+# angie-console-light 是纯前端产物（官方已提供预编译包），直接下载无需 node/yarn 构建
 RUN curl -fL -o angie-console-light.tar.gz \
     https://download.angie.software/files/angie-console-light/angie-console-light-$CONSOLE_LIGHT_VERSION.tar.gz \
     && tar -xzf angie-console-light.tar.gz
@@ -68,7 +82,6 @@ RUN cd /tmp/ngx_brotli/deps/brotli \
     && cmake .. -DCMAKE_BUILD_TYPE=Release \
     && cmake --build . -j$(nproc)
 
-# Configure and build Angie with NTLS support
 WORKDIR /tmp/angie-$ANGIE_VERSION
 
 # ------------------------------------------------------------------------------
@@ -125,9 +138,7 @@ RUN ./configure \
     --with-pcre=../pcre2-$PCRE2_VERSION \
     --with-pcre-jit \
     --with-ld-opt='-Wl,--as-needed,-O1,--sort-common -Wl,-z,pack-relative-relocs' \
-    --with-openssl=../tongsuo-$TONGSUO_VERSION \
-    --with-openssl-opt=enable-ntls \
-    --with-ntls \
+    --with-openssl=../openssl-$OPENSSL_VERSION \
     --builddir=objs-nodebug \
     --feature-cache=../angie-feature-cache \
     --add-dynamic-module=../ngx_brotli \
@@ -196,9 +207,7 @@ RUN ./configure \
     --with-pcre=../pcre2-$PCRE2_VERSION \
     --with-pcre-jit \
     --with-ld-opt='-Wl,--as-needed,-O1,--sort-common -Wl,-z,pack-relative-relocs' \
-    --with-openssl=../tongsuo-$TONGSUO_VERSION \
-    --with-openssl-opt=enable-ntls \
-    --with-ntls \
+    --with-openssl=../openssl-$OPENSSL_VERSION \
     --builddir=objs-debug \
     --feature-cache=../angie-feature-cache \
     --add-dynamic-module=../ngx_brotli \
@@ -211,6 +220,7 @@ RUN ./configure \
     --add-dynamic-module=../set-misc-nginx-module \
     && make -j$(nproc) \
     && cp objs-debug/angie /tmp/angie-install/usr/sbin/angie-debug
+
 
 FROM alpine:3.22 AS product
 
@@ -231,7 +241,7 @@ COPY --from=builder /tmp/angie-install/ /
 COPY --from=builder /tmp/angie-console-light-$CONSOLE_LIGHT_VERSION/html/ \
     /usr/share/angie-console-light/html/
 
-# Tongsuo is statically linked (.a archives), no runtime library copy needed
+# OpenSSL is statically linked (.a archives), no runtime library copy needed
 
 # Clean up .default files, relocate html, create modules symlink and http.d/stream.d directories
 RUN rm -f /etc/angie/*.default \
@@ -241,7 +251,7 @@ RUN rm -f /etc/angie/*.default \
     && ln -s /usr/lib/angie/modules /etc/angie/modules \
     && mkdir -p /etc/angie/http.d /etc/angie/stream.d
 
-# Create necessary directories and set permissions
+# Create necessary directories (incl. ACME storage) and set permissions
 RUN mkdir -p /var/cache/angie /var/log/angie /run/angie /var/lib/angie/acme \
     && chown -R angie:angie /var/cache/angie /var/log/angie /run/angie /var/lib/angie \
         /etc/angie /usr/share/angie /usr/share/angie-console-light
@@ -266,11 +276,13 @@ COPY angie.conf.template /etc/angie/templates/angie.conf
 COPY init /
 RUN chmod +x /init
 
-EXPOSE 80 443
+# 80/443 TCP + 443 UDP（HTTP/3 必须）
+EXPOSE 80 443 443/udp
 
 ENTRYPOINT ["/init"]
 
 # Environment variables for runtime configuration
+# possible values: angie, angie-debug, angie-nodebug
 ENV ANGIE_BINARY="angie"
 ENV ANGIE_CONFIG_TEMPLATES="/etc/angie/templates"
 ENV ANGIE_ERROR_LOG_SEVERITY="notice"

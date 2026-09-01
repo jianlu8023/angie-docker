@@ -2,6 +2,17 @@
 
 ## 快速开始
 
+## 三种镜像变体
+
+| Dockerfile | SSL 库 | 国密 NTLS | HTTP/3 | 说明 |
+|---|---|---|---|---|
+| `Dockerfile` | 铜锁 8.4.0 (OpenSSL 3.0.3) | 支持 | 有，但**无 0-RTT** | 国密主力镜像 |
+| `Dockerfile-template` | 铜锁 8.4.0 (OpenSSL 3.0.3) | 支持 | 有，但**无 0-RTT** | 同上 + gomplate 模板渲染 |
+| `Dockerfile-h3` | OpenSSL 3.5.7 | **不支持** | 完整（含 0-RTT） | 高性能 HTTP/3 镜像 |
+
+> NTLS 与 QUIC 不可兼得：铜锁基于 OpenSSL 3.0.3，没有 QUIC API；而支持 QUIC 的库都没有国密。
+> 用铜锁时 angie 会退到「OpenSSL 兼容层」，HTTP/3 能跑但 `ssl_early_data` 无效。
+
 1. 构建镜像
 
 * 构建支持template的镜像
@@ -16,10 +27,24 @@ docker buildx build -t angie:ntls-template-alpine -f Dockerfile-template .
 docker buildx build -t angie:ntls-alpine -f Dockerfile .
 ```
 
+* 构建 HTTP/3 镜像
+
+```shell
+docker buildx build -t angie:h3-alpine -f Dockerfile-h3 .
+```
+
 2. 运行容器
 
 ```shell
 docker run --rm --name angie-ntls -p 8089:80 -v http.d:/etc/angie/http.d -v stream.d:/etc/angie/stream.d angie:ntls-alpine 
+```
+
+* 运行 HTTP/3 镜像（HTTP/3 走 UDP，**必须**放通 443/udp）
+
+```shell
+docker run --rm --name angie-h3 \
+  -p 80:80 -p 443:443 -p 443:443/udp \
+  angie:h3-alpine
 ```
 
 3. 验证NTLS支持
@@ -55,6 +80,38 @@ configure arguments: --prefix=/etc/angie --conf-path=/etc/angie/angie.conf --err
 ![GM证书](images/gmtls.png)
 
 ![RSA证书](images/tls.png)
+
+## HTTP/3 配置参考
+
+`Dockerfile-h3` 构建出的镜像支持完整 HTTP/3（含 0-RTT）。监听配置：
+
+```nginx
+server {
+    listen 443 quic reuseport;   # QUIC / UDP，reuseport 配合多 worker
+    listen 443 ssl;              # 同时保留 TCP 回退
+
+    ssl_certificate     /etc/angie/certs/rsa/hserver.crt;
+    ssl_certificate_key /etc/angie/certs/rsa/hserver.key;
+
+    ssl_protocols TLSv1.3;       # QUIC 强制要求 TLS 1.3
+    ssl_early_data on;           # 0-RTT，仅 OpenSSL >= 3.5.1 生效
+
+    http3 on;
+    quic_retry on;
+    quic_gso on;                 # 网卡支持 GSO 时开启
+
+    location / {
+        add_header Alt-Svc 'h3=":443"; ma=86400';   # 告知客户端支持 h3
+        root /usr/share/angie/html;
+    }
+}
+```
+
+验证：
+
+```shell
+curl -v --http3 https://your-server.example   # 看到 "using HTTP/3" 即成功
+```
 
 
 ## ssl-gm.conf 参考

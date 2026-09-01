@@ -1,9 +1,14 @@
+ARG CONSOLE_LIGHT_VERSION=1.8.2
+
 FROM alpine:3.22 AS builder
 
+ARG CONSOLE_LIGHT_VERSION
 
 ENV TONGSUO_VERSION=8.4.0
 
 ENV ANGIE_VERSION=1.12.1
+
+ENV PCRE2_VERSION=10.45
 
 # Install build dependencies
 RUN apk add --no-cache \
@@ -30,6 +35,16 @@ RUN git clone -b $TONGSUO_VERSION --depth 1 \
 RUN curl -L -o angie-$ANGIE_VERSION.tar.gz \
     https://download.angie.software/files/angie-$ANGIE_VERSION.tar.gz \
     && tar -xzf angie-$ANGIE_VERSION.tar.gz
+
+# Download and extract PCRE2 source (built statically with JIT for regex performance)
+RUN curl -L -o pcre2-$PCRE2_VERSION.tar.gz \
+    https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$PCRE2_VERSION/pcre2-$PCRE2_VERSION.tar.gz \
+    && tar -xzf pcre2-$PCRE2_VERSION.tar.gz
+
+# angie-console-light 是纯前端产物（官方已提供预编译包）
+RUN curl -fL -o angie-console-light.tar.gz \
+    https://download.angie.software/files/angie-console-light/angie-console-light-$CONSOLE_LIGHT_VERSION.tar.gz \
+    && tar -xzf angie-console-light.tar.gz
 
 # Clone third-party dynamic module sources
 RUN git clone --recurse-submodules --depth 1 \
@@ -58,6 +73,12 @@ RUN cd /tmp/ngx_brotli/deps/brotli \
 # Configure and build Angie with NTLS support
 WORKDIR /tmp/angie-$ANGIE_VERSION
 
+# ------------------------------------------------------------------------------
+# 构建 1/2 —— 正式版（angie-nodebug）
+# --builddir 让两次构建互不干扰；--feature-cache 复用 OS 特性探测结果，加速第二次 configure
+# 注意：顶层 Makefile 由 configure 生成且会被下一次 configure 覆盖，
+#       所以每次 configure 后必须立刻执行对应的 make / make install
+# ------------------------------------------------------------------------------
 RUN ./configure \
     --prefix=/etc/angie \
     --conf-path=/etc/angie/angie.conf \
@@ -103,10 +124,14 @@ RUN ./configure \
     --with-stream_ssl_module \
     --with-stream_ssl_preread_module \
     --with-threads \
+    --with-pcre=../pcre2-$PCRE2_VERSION \
+    --with-pcre-jit \
     --with-ld-opt='-Wl,--as-needed,-O1,--sort-common -Wl,-z,pack-relative-relocs' \
     --with-openssl=../tongsuo-$TONGSUO_VERSION \
     --with-openssl-opt=enable-ntls \
     --with-ntls \
+    --builddir=objs-nodebug \
+    --feature-cache=../angie-feature-cache \
     --add-dynamic-module=../ngx_brotli \
     --add-dynamic-module=../headers-more-nginx-module \
     --add-dynamic-module=../echo-nginx-module \
@@ -116,21 +141,98 @@ RUN ./configure \
     --add-dynamic-module=../ngx_devel_kit \
     --add-dynamic-module=../set-misc-nginx-module \
     && make -j$(nproc) \
-    && make install DESTDIR=/tmp/angie-install
+    && make install DESTDIR=/tmp/angie-install \
+    && mv /tmp/angie-install/usr/sbin/angie /tmp/angie-install/usr/sbin/angie-nodebug \
+    && ln -s angie-nodebug /tmp/angie-install/usr/sbin/angie
+
+# ------------------------------------------------------------------------------
+# 构建 2/2 —— 调试版（angie-debug，--with-debug 开启 NGX_DEBUG）
+# 只要二进制，不再执行 make install，避免覆盖上一轮已安装的文件
+# ------------------------------------------------------------------------------
+RUN ./configure \
+    --prefix=/etc/angie \
+    --conf-path=/etc/angie/angie.conf \
+    --error-log-path=/var/log/angie/error.log \
+    --http-log-path=/var/log/angie/access.log \
+    --lock-path=/run/angie.lock \
+    --modules-path=/usr/lib/angie/modules \
+    --pid-path=/run/angie.pid \
+    --sbin-path=/usr/sbin/angie \
+    --http-acme-client-path=/var/lib/angie/acme \
+    --http-client-body-temp-path=/var/cache/angie/client_temp \
+    --http-fastcgi-temp-path=/var/cache/angie/fastcgi_temp \
+    --http-proxy-temp-path=/var/cache/angie/proxy_temp \
+    --http-scgi-temp-path=/var/cache/angie/scgi_temp \
+    --http-uwsgi-temp-path=/var/cache/angie/uwsgi_temp \
+    --user=angie \
+    --group=angie \
+    --with-debug \
+    --with-file-aio \
+    --with-http_acme_module \
+    --with-http_addition_module \
+    --with-http_auth_request_module \
+    --with-http_dav_module \
+    --with-http_flv_module \
+    --with-http_gunzip_module \
+    --with-http_gzip_static_module \
+    --with-http_mp4_module \
+    --with-http_random_index_module \
+    --with-http_realip_module \
+    --with-http_secure_link_module \
+    --with-http_slice_module \
+    --with-http_ssl_module \
+    --with-http_stub_status_module \
+    --with-http_sub_module \
+    --with-http_v2_module \
+    --with-http_v3_module \
+    --with-mail \
+    --with-mail_ssl_module \
+    --with-stream \
+    --with-stream_acme_module \
+    --with-stream_mqtt_preread_module \
+    --with-stream_rdp_preread_module \
+    --with-stream_realip_module \
+    --with-stream_ssl_module \
+    --with-stream_ssl_preread_module \
+    --with-threads \
+    --with-pcre=../pcre2-$PCRE2_VERSION \
+    --with-pcre-jit \
+    --with-ld-opt='-Wl,--as-needed,-O1,--sort-common -Wl,-z,pack-relative-relocs' \
+    --with-openssl=../tongsuo-$TONGSUO_VERSION \
+    --with-openssl-opt=enable-ntls \
+    --with-ntls \
+    --builddir=objs-debug \
+    --feature-cache=../angie-feature-cache \
+    --add-dynamic-module=../ngx_brotli \
+    --add-dynamic-module=../headers-more-nginx-module \
+    --add-dynamic-module=../echo-nginx-module \
+    --add-dynamic-module=../ngx_http_substitutions_filter_module \
+    --add-dynamic-module=../ngx_cache_purge \
+    --add-dynamic-module=../nginx-dav-ext-module \
+    --add-dynamic-module=../ngx_devel_kit \
+    --add-dynamic-module=../set-misc-nginx-module \
+    && make -j$(nproc) \
+    && cp objs-debug/angie /tmp/angie-install/usr/sbin/angie-debug
 
 
 FROM alpine:3.22 AS product
+
+ARG CONSOLE_LIGHT_VERSION
 
 LABEL org.opencontainers.image.authors="Release Engineering Team <devops@tech.wbsrv.ru>"
 LABEL org.opencontainers.image.authors="Jianlu <jianlu8023@gmail.com>"
 
 # Install runtime dependencies and create angie user
 RUN set -x \
-    && apk add --no-cache bash ca-certificates curl pcre2 zlib \
+    && apk add --no-cache bash ca-certificates curl pcre2 zlib logrotate \
     && adduser -D -H -u 101 -s /sbin/nologin angie
 
 # Copy Angie installation from builder
 COPY --from=builder /tmp/angie-install/ /
+
+# angie-console-light 静态前端资源
+COPY --from=builder /tmp/angie-console-light-$CONSOLE_LIGHT_VERSION/html/ \
+    /usr/share/angie-console-light/html/
 
 # Tongsuo is statically linked (.a archives), no runtime library copy needed
 
@@ -143,12 +245,21 @@ RUN rm -f /etc/angie/*.default \
     && mkdir -p /etc/angie/http.d /etc/angie/stream.d
 
 # Create necessary directories and set permissions
-RUN mkdir -p /var/cache/angie /var/log/angie /run/angie \
-    && chown -R angie:angie /var/cache/angie /var/log/angie /run/angie /etc/angie /usr/share/angie
+RUN mkdir -p /var/cache/angie /var/log/angie /run/angie /var/lib/angie/acme \
+    && chown -R angie:angie /var/cache/angie /var/log/angie /run/angie /var/lib/angie \
+        /etc/angie /usr/share/angie /usr/share/angie-console-light
 
 # Redirect logs to stdout/stderr
 RUN ln -sf /dev/stdout /var/log/angie/access.log \
     && ln -sf /dev/stderr /var/log/angie/error.log
+
+# logrotate 配置 + 每日定时任务脚本
+# 默认镜像内没有 cron 守护进程，因此 logrotate 不会自动运行；
+# 需要归档时自行拉起 crond，或用外部 cron 执行 `docker exec <ctr> logrotate /etc/logrotate.conf`
+COPY logrotate.d/angie /etc/logrotate.d/angie
+RUN mkdir -p /etc/periodic/daily /var/lib/logrotate \
+    && printf '#!/bin/sh\n[ -x /usr/sbin/logrotate ] || exit 0\n/usr/sbin/logrotate -s /var/lib/logrotate/logrotate.status /etc/logrotate.conf\nexit 0\n' > /etc/periodic/daily/logrotate \
+    && chmod +x /etc/periodic/daily/logrotate
 
 # Copy configuration files
 COPY angie.conf /etc/angie/
