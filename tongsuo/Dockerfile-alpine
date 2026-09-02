@@ -1,16 +1,21 @@
 FROM alpine:3.22 AS builder
 
-ENV TONGSUO_VERSION=8.4.0
+ENV TONGSUO_VERSION=8.4.0 \
+    # tag 8.4.0 对应的 commit
+    TONGSUO_SHA256=a8ae0925d26de3b449f7a21767910cd41291bcd8
 
 RUN sed -i "s|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g" /etc/apk/repositories && \
     apk update && \
     apk add \
-    git make perl gcc musl-dev linux-headers \
+    git make perl gcc musl-dev linux-headers build-base \
     ca-certificates \
     zip unzip
 
 WORKDIR /usr/local/src
-RUN git clone -b $TONGSUO_VERSION --depth=1 https://github.com/tongsuo-project/tongsuo.git tongsuo-$TONGSUO_VERSION
+RUN git init tongsuo-$TONGSUO_VERSION \
+    && git -C tongsuo-$TONGSUO_VERSION remote add origin https://github.com/tongsuo-project/tongsuo.git \
+    && git -C tongsuo-$TONGSUO_VERSION fetch --depth 1 origin $TONGSUO_SHA256 \
+    && git -C tongsuo-$TONGSUO_VERSION checkout --detach FETCH_HEAD
 
 WORKDIR /usr/local/src/tongsuo-$TONGSUO_VERSION
 
@@ -34,7 +39,19 @@ RUN ./config --prefix=/usr/local/tongsuo \
     make install && \
     make clean
 
-ENV PATH=/usr/local/tongsuo/bin:$PATH
+
+FROM alpine:3.22 AS product
+
+RUN apk add --no-cache ca-certificates tzdata
+
+# tongsuo 二进制（静态）+ openssldir（配置/证书目录）
+COPY --from=builder /usr/local/tongsuo/bin/ /usr/local/tongsuo/bin/
+COPY --from=builder /usr/local/tongsuo/include/ /usr/local/tongsuo/include/
+COPY --from=builder /usr/local/tongsuo/ssl/ /usr/local/tongsuo/ssl/
+COPY --from=builder /usr/local/tongsuo/lib64/ /usr/local/tongsuo/lib64/
+
+ENV PATH=/usr/local/tongsuo/bin:$PATH \
+    TZ=Asia/Shanghai
 
 WORKDIR /workspace
 

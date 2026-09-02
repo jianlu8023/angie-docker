@@ -1,7 +1,5 @@
 # angie-docker
 
-## 快速开始
-
 ## 三种镜像变体
 
 | Dockerfile | SSL 库 | 国密 NTLS | HTTP/3 | 说明 |
@@ -10,21 +8,21 @@
 | `Dockerfile-template` | 铜锁 8.4.0 (OpenSSL 3.0.3) | 支持 | 有，但**无 0-RTT** | 同上 + gomplate 模板渲染 |
 | `Dockerfile-h3` | OpenSSL 3.5.7 | **不支持** | 完整（含 0-RTT） | 高性能 HTTP/3 镜像 |
 
-> NTLS 与 QUIC 不可兼得：铜锁基于 OpenSSL 3.0.3，没有 QUIC API；而支持 QUIC 的库都没有国密。
-> 用铜锁时 angie 会退到「OpenSSL 兼容层」，HTTP/3 能跑但 `ssl_early_data` 无效。
+
+## 快速开始
 
 1. 构建镜像
 
-* 构建支持template的镜像
-
-```shell
-docker buildx build -t angie:ntls-template-alpine -f Dockerfile-template .
-```
-
-* 构建镜像
+* 构建主镜像（极简版：`CMD ["angie","-g","daemon off;"]`，PID1 即 angie master，前台运行）
 
 ```shell
 docker buildx build -t angie:ntls-alpine -f Dockerfile .
+```
+
+* 构建支持 template 的镜像（`/init` 启动 + `ANGIE_*` ENV 渲染 `angie.conf.template`）
+
+```shell
+docker buildx build -t angie:ntls-template-alpine -f Dockerfile-template .
 ```
 
 * 构建 HTTP/3 镜像
@@ -36,7 +34,9 @@ docker buildx build -t angie:h3-alpine -f Dockerfile-h3 .
 2. 运行容器
 
 ```shell
-docker run --rm --name angie-ntls -p 8089:80 -v http.d:/etc/angie/http.d -v stream.d:/etc/angie/stream.d angie:ntls-alpine 
+docker run --rm --name angie-ntls --ulimit nofile=65536:65536 \
+  -p 8089:80 -v http.d:/etc/angie/http.d -v stream.d:/etc/angie/stream.d \
+  angie:ntls-alpine
 ```
 
 * 运行 HTTP/3 镜像（HTTP/3 走 UDP，**必须**放通 443/udp）
@@ -75,6 +75,38 @@ configure arguments: --prefix=/etc/angie --conf-path=/etc/angie/angie.conf --err
 --add-dynamic-module=../ngx_http_substitutions_filter_module --add-dynamic-module=../ngx_cache_purge 
 --add-dynamic-module=../nginx-dav-ext-module --add-dynamic-module=../ngx_devel_kit 
 --add-dynamic-module=../set-misc-nginx-module
+```
+
+## NTLS（国密）站点
+
+### 规则
+
+1. **一个端口只能挂一个国密站点**：NTLS 握手只发生在 default vhost 的 SSL_CTX/证书上（SNI 路由在握手之后才生效），所以 default vhost 本身必须就是 `sign:/enc:` 双证书的 NTLS vhost；
+2. **双证书必须用 `sign:`/`enc:` 前缀**（不是空格分隔——两条 `ssl_certificate` 只有第一条生效，且无后缀双证书 vhost 实测只服务国密）；
+3. **`ssl_ntls on` 是双模式**：不关闭标准 TLS，同一 vhost 仍服务 TLS1.2/1.3（含 `TLS_SM4_GCM_SM3` 国套件）；
+4. **`ssl_protocols` 不影响 NTLS 协商**（NTLSv1.1 总能协商成功）。
+
+参考模板已内置在镜像 `/etc/angie/http.d/ntls-gm.conf.example`（仓库 `http.d/ntls-gm.conf.example`），启用国密 443 时改为 `.conf` 并填证书路径：
+
+```nginx
+server {
+    # ★ NTLS 握手只用 default vhost 的证书：一端口一国密站点
+    listen 443 ssl default_server;
+    server_name gm.example.com;
+
+    ssl_ntls on;
+    # 签名/加密双证书（sign:/enc: 前缀，顺序：签名在前）
+    ssl_certificate sign:/etc/angie/certs/sm2/server_sign.crt
+                  enc:/etc/angie/certs/sm2/server_enc.crt;
+    ssl_certificate_key sign:/etc/angie/certs/sm2/server_sign.key
+                  enc:/etc/angie/certs/sm2/server_enc.key;
+    # 实测可用的 TLCP（NTLSv1.1）套件
+    ssl_ciphers "ECDHE-SM2-SM4-GCM-SM3:ECC-SM2-SM4-GCM-SM3:ECDHE-SM2-SM4-CBC-SM3:ECC-SM2-SM4-CBC-SM3";
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    location / { root /usr/share/angie/html; }
+}
 ```
 
 ![GM证书](images/gmtls.png)
@@ -148,3 +180,8 @@ server {
     }
 }
 ```
+
+## 安全说明
+
+- `/status/`（stub_status）与 `/console/`、`/console/api/` 在 `http.d/default.conf` 中均限制为 `allow 127.0.0.1; deny all;`，需要外部访问时请改为实际内网段并配合反向代理认证；
+- 建议 HTTPS 站点加 HSTS：`add_header Strict-Transport-Security "max-age=31536000" always;`

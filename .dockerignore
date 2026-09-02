@@ -1,0 +1,14 @@
+### GIT ###
+.git
+.gitignore
+
+### Jetbrains IDE ###
+.idea/
+
+### Project ###
+*.md
+images/
+
+### Other ### 
+*.swp
+.DS_Store
