@@ -42,7 +42,9 @@ RUN ./config --prefix=/usr/local/tongsuo \
 
 FROM alpine:3.22 AS product
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
 
 # tongsuo 二进制（静态）+ openssldir（配置/证书目录）
 COPY --from=builder /usr/local/tongsuo/bin/ /usr/local/tongsuo/bin/

@@ -229,7 +229,9 @@ LABEL org.opencontainers.image.authors="Jianlu <jianlu8023@gmail.com>; Release E
 
 # Install runtime dependencies and create angie user
 RUN set -x \
-    && apk add --no-cache bash ca-certificates curl pcre2 zlib tzdata\
+    && apk add --no-cache bash ca-certificates curl pcre2 zlib tzdata \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
     && adduser -D -H -u 101 -s /sbin/nologin angie
 
 # Copy Angie installation from builder

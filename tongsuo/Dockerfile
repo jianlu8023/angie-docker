@@ -54,8 +54,10 @@ RUN ./config --prefix=/usr/local/tongsuo \
 FROM ubuntu:22.04 AS product
 
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tzdata && \
-    rm -rf /var/lib/apt/lists/*
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
+    && rm -rf /var/lib/apt/lists/*
 
 # tongsuo 二进制（静态）+ openssldir（配置/证书目录）
 COPY --from=builder /usr/local/tongsuo/bin/ /usr/local/tongsuo/bin/
